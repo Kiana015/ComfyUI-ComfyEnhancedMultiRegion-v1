@@ -1,4 +1,5 @@
 import math
+import traceback
 import torch
 from nodes import MAX_RESOLUTION, ConditioningCombine, ConditioningSetMask
 from comfy_extras.nodes_mask import MaskComposite, SolidMask
@@ -57,7 +58,8 @@ class ComfyMultiRegion:
 
             return AttentionCouple().attention_couple(model, positive_combined, negative, "Attention", isolation_factor, cross_region_blend)
         except Exception as e:
-            print(f"An error occurred: {str(e)}")
+            print(f"[ComfyMultiRegion] ERROR: {str(e)}")
+            traceback.print_exc()
             return None, None, None
 
     @staticmethod
