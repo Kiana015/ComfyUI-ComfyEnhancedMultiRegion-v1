@@ -49,7 +49,13 @@ class ComfyMultiRegion:
             masks = self.create_masks(ratios, orientation, width, height)
 
             # Apply masks and weights to positive conditionings
-            conditioned_masks = [ConditioningSetMask().append(pos, mask, "default", weight)[0] for pos, mask, weight in zip(positives, masks, weights)]
+            # Use keyword arguments to be compatible across ComfyUI versions
+            conditioned_masks = []
+            for pos, mask, weight in zip(positives, masks, weights):
+                cond_entry = ConditioningSetMask().append(
+                    conditioning=pos, mask=mask, strength=weight, set_cond_area="default"
+                )[0]
+                conditioned_masks.append(cond_entry)
 
             # Combine all conditioned masks
             positive_combined = conditioned_masks[0]
