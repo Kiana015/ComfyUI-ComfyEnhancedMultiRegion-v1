@@ -67,13 +67,13 @@ class ComfyMultiRegion:
         masks = torch.zeros((num_regions, height, width), device=device)
 
         # Calculate region boundaries in pixels
+        main_dim = width if orientation == "horizontal" else height
         boundaries = [0]
         for ratio in ratios[:-1]:
-            boundaries.append(boundaries[-1] + math.floor(width * ratio))
-        boundaries.append(width)
+            boundaries.append(boundaries[-1] + math.floor(main_dim * ratio))
+        boundaries.append(main_dim)
 
         # Feather width as fraction of image dimension (~12.5%)
-        main_dim = width if orientation == "horizontal" else height
         feather_pixels = max(8, main_dim // 8)
         scale = feather_pixels / 4  # sigmoid steepness: transition ~feather_pixels wide
 
