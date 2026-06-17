@@ -63,19 +63,53 @@ class ComfyMultiRegion:
     @staticmethod
     def create_masks(ratios, orientation, width, height):
         device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        masks = torch.zeros((len(ratios), height, width), device=device)
-        start = 0
+        num_regions = len(ratios)
+        masks = torch.zeros((num_regions, height, width), device=device)
 
-        for i, ratio in enumerate(ratios):
-            if orientation == "horizontal":
-                region_width = math.floor(width * ratio)
-                end = min(start + region_width, width)
-                masks[i, :, start:end] = 1.0
-            else:  # vertical
-                region_height = math.floor(height * ratio)
-                end = min(start + region_height, height)
-                masks[i, start:end, :] = 1.0
-            start = end
+        # Calculate region boundaries in pixels
+        boundaries = [0]
+        for ratio in ratios[:-1]:
+            boundaries.append(boundaries[-1] + math.floor(width * ratio))
+        boundaries.append(width)
+
+        # Feather width as fraction of image dimension (~12.5%)
+        main_dim = width if orientation == "horizontal" else height
+        feather_pixels = max(8, main_dim // 8)
+        scale = feather_pixels / 4  # sigmoid steepness: transition ~feather_pixels wide
+
+        if orientation == "horizontal":
+            x = torch.arange(width, device=device).float()
+            for i in range(num_regions):
+                left = boundaries[i]
+                right = boundaries[i + 1]
+                if num_regions == 1:
+                    masks[i] = 1.0
+                elif i == 0:
+                    masks[i] = 1.0 - torch.sigmoid((x - right) / scale)
+                elif i == num_regions - 1:
+                    masks[i] = torch.sigmoid((x - left) / scale)
+                else:
+                    masks[i] = torch.sigmoid((x - left) / scale) * \
+                              (1.0 - torch.sigmoid((x - right) / scale))
+        else:  # vertical
+            y = torch.arange(height, device=device).float()
+            scale = feather_pixels / 4
+            for i in range(num_regions):
+                top = boundaries[i]
+                bottom = boundaries[i + 1]
+                if num_regions == 1:
+                    masks[i] = 1.0
+                elif i == 0:
+                    masks[i] = 1.0 - torch.sigmoid((y - bottom) / scale)
+                elif i == num_regions - 1:
+                    masks[i] = torch.sigmoid((y - top) / scale)
+                else:
+                    masks[i] = torch.sigmoid((y - top) / scale) * \
+                              (1.0 - torch.sigmoid((y - bottom) / scale))
+
+        # Ensure sum to 1 (numerical safety)
+        mask_sum = masks.sum(dim=0, keepdim=True)
+        masks = masks / (mask_sum + 1e-6)
 
         return masks
 

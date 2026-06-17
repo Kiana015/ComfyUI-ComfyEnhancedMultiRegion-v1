@@ -178,7 +178,7 @@ class AttentionCouple:
                 masks = masks.to(dtype=q_target.dtype)
 
                 # Apply sharpened masks based on isolation factor
-                sharpened_masks = self.sharpen_masks(masks, self.isolation_factor)
+                sharpened_masks = self.sharpen_masks(masks, self.isolation_factor, length)
                 
                 # Regional attention
                 qkv_regional = optimized_attention(q_target, k_rep, v_rep, extra_options["n_heads"])
@@ -205,15 +205,23 @@ class AttentionCouple:
             return out
         return patch
 
-    def sharpen_masks(self, masks, isolation_factor):
+    def sharpen_masks(self, masks, isolation_factor, num_regions):
         # Convert isolation_factor to a tensor with the same device and dtype as masks
         isolation_factor_tensor = torch.tensor(isolation_factor, device=masks.device, dtype=masks.dtype)
         
-        # Create a sharper transition based on the isolation factor
-        sharpened = torch.pow(masks, torch.exp(isolation_factor_tensor))
+        # Reshape to separate regions and batch: [num_regions, b, seq_len, dim]
+        orig_shape = masks.shape
+        b_size = orig_shape[0] // num_regions
+        masks_reshaped = masks.view(num_regions, b_size, *orig_shape[1:])
         
-        # Normalize the sharpened masks
+        # Apply power sharpening based on isolation factor
+        sharpened = torch.pow(masks_reshaped, torch.exp(isolation_factor_tensor))
+        
+        # Normalize per-pixel over REGIONS only (dim=0), not over batch
         sharpened = sharpened / (sharpened.sum(dim=0, keepdim=True) + 1e-6)
+        
+        # Reshape back to original [num_regions * b, seq_len, dim]
+        sharpened = sharpened.view(orig_shape)
         
         return sharpened
 
