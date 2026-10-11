@@ -2,7 +2,7 @@ import math
 import torch
 from nodes import MAX_RESOLUTION, ConditioningCombine, ConditioningSetMask
 from comfy_extras.nodes_mask import MaskComposite, SolidMask
-from .attention_couple import AttentionCouple
+from .attention_couple import AttentionCouple, MODEL_TYPES
 
 class ComfyMultiRegion:
     @classmethod
@@ -21,7 +21,9 @@ class ComfyMultiRegion:
                 "cross_region_blend": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
                 **{f"positive_{i+1}": ("CONDITIONING",) for i in range(10)},
                 **{f"ratio_{i+1}": ("FLOAT", {"default": 0.5, "min": 0, "max": 1.0, "step": 0.01}) for i in range(9)},
-                **{f"weight_{i+1}": ("FLOAT", {"default": 1.0, "min": 0, "max": 10.0, "step": 0.1}) for i in range(10)}
+                **{f"weight_{i+1}": ("FLOAT", {"default": 1.0, "min": 0, "max": 10.0, "step": 0.1}) for i in range(10)},
+                # kept last so widget values of existing workflows stay in place
+                "model_type": (MODEL_TYPES,),
             }
         }
 
@@ -32,6 +34,7 @@ class ComfyMultiRegion:
     def process(self, model, negative, orientation, num_regions, width, height, isolation_factor, **kwargs):
         try:
             cross_region_blend = kwargs.get("cross_region_blend", 0.3)
+            model_type = kwargs.get("model_type", MODEL_TYPES[0])
             positives = [kwargs.get(f"positive_{i+1}") for i in range(num_regions)]
             ratios = [kwargs.get(f"ratio_{i+1}", 1.0 / num_regions) for i in range(num_regions - 1)]
             weights = [kwargs.get(f"weight_{i+1}", 1.0) for i in range(num_regions)]
@@ -55,7 +58,7 @@ class ComfyMultiRegion:
             for mask in conditioned_masks[1:]:
                 positive_combined = ConditioningCombine().combine(positive_combined, mask)[0]
 
-            return AttentionCouple().attention_couple(model, positive_combined, negative, "Attention", isolation_factor, cross_region_blend)
+            return AttentionCouple().attention_couple(model, positive_combined, negative, "Attention", isolation_factor, cross_region_blend, model_type)
         except Exception as e:
             print(f"An error occurred: {str(e)}")
             return None, None, None
