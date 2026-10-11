@@ -49,6 +49,16 @@ The `model_type` input (last widget on the node) selects which architecture the 
 
 If `model_type` does not match the connected model, the node prints an error to the console and outputs nothing.
 
+**Reducing leakage between regions (Anima)**
+
+Anima's self-attention is global, so text bound to one region (e.g. `red eyes`) can leak into the others. Two inputs control this:
+
+- `isolation_factor`: strength of the self-attention block between regions (0 = off, 1 = fully blocked; attention towards other regions is scaled by `(1 - isolation_factor)²`). Try 0.8–0.95 if attributes leak; very high values can make the regions look disconnected (seams, mismatched lighting).
+- `cross_region_blend`: mixes the output of regions whose prompts are similar. Prompts that share most tags (quality tags, `2girls`, ...) count as similar, so this leaks by design. Set it to 0 when attributes leak.
+
+On SDXL, `isolation_factor` only sharpens soft masks and has no effect on the hard masks this node generates.
+
+
 
 ## Credits
 

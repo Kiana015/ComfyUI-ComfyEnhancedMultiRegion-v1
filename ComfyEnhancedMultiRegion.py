@@ -15,10 +15,10 @@ class ComfyMultiRegion:
                 "num_regions": ("INT", {"default": 2, "min": 2, "max": 10, "step": 1}),
                 "width": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8}),
                 "height": ("INT", {"default": 512, "min": 16, "max": MAX_RESOLUTION, "step": 8}),
-                "isolation_factor": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "isolation_factor": ("FLOAT", {"default": 0.5, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Anima: how strongly self-attention between regions is blocked (0 = off, 1 = fully blocked). SDXL: only sharpens soft masks, no effect on the hard masks of this node."}),
             },
             "optional": {
-                "cross_region_blend": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "cross_region_blend": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Mixes the cross-attention output of regions with similar prompts. Set to 0 if attributes leak between regions."}),
                 **{f"positive_{i+1}": ("CONDITIONING",) for i in range(10)},
                 **{f"ratio_{i+1}": ("FLOAT", {"default": 0.5, "min": 0, "max": 1.0, "step": 0.01}) for i in range(9)},
                 **{f"weight_{i+1}": ("FLOAT", {"default": 1.0, "min": 0, "max": 10.0, "step": 0.1}) for i in range(10)},
