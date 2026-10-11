@@ -4,6 +4,7 @@ import copy
 import math
 import comfy
 import comfy.model_base
+import comfy.patcher_extension
 from comfy.ldm.modules.attention import optimized_attention
 
 def get_masks_from_q(masks, q, original_shape):
@@ -204,6 +205,15 @@ class AttentionCouple:
 
         new_model = model.clone()
         base_model = new_model.model
+
+        def record_token_grid(executor, x, *args, **kwargs):
+            # the node's width/height widgets can differ from the real latent, so read the real grid (patch size 2)
+            options = kwargs.get("transformer_options")
+            if options is not None:
+                options["anima_token_grid"] = (math.ceil(x.shape[-2] / 2), math.ceil(x.shape[-1] / 2))
+            return executor(x, *args, **kwargs)
+        new_model.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, "multi_region_anima", record_token_grid)
+
         # Self-attention is global in a DiT, so text bound to one region leaks into the others through it.
         # isolation_factor biases self-attention against tokens of other regions (0 = off).
         isolate_self_attn = isolation_factor > 0 and self.anima_regions[1][0] is not None
@@ -250,20 +260,23 @@ class AttentionCouple:
         self.anima_contexts_key = key
         return self.anima_contexts
 
-    def get_anima_token_masks(self, index, n_tokens, device, dtype):
-        key = (index, n_tokens, device, dtype)
+    def get_anima_token_masks(self, index, n_tokens, device, dtype, grid=None):
+        key = (index, n_tokens, grid, device, dtype)
         if key not in self.anima_token_masks:
             masks = self.anima_regions[index][0]
-            h, w = anima_token_grid(n_tokens, masks.shape[-2], masks.shape[-1])
+            if grid is not None and grid[0] * grid[1] == n_tokens:
+                h, w = grid
+            else:  # no latent shape available, guess it from the mask aspect ratio
+                h, w = anima_token_grid(n_tokens, masks.shape[-2], masks.shape[-1])
             token_masks = F.interpolate(masks, size=(h, w), mode="nearest").view(masks.shape[0], h * w)
             token_masks = self.sharpen_masks(token_masks, self.isolation_factor)
             self.anima_token_masks[key] = token_masks.to(device=device, dtype=dtype)
         return self.anima_token_masks[key]
 
-    def get_anima_self_attn_bias(self, n_tokens, device, dtype):
-        key = ("self_attn", n_tokens, device, dtype)
+    def get_anima_self_attn_bias(self, n_tokens, device, dtype, grid=None):
+        key = ("self_attn", n_tokens, grid, device, dtype)
         if key not in self.anima_token_masks:
-            token_masks = self.get_anima_token_masks(1, n_tokens, device, torch.float32)
+            token_masks = self.get_anima_token_masks(1, n_tokens, device, torch.float32, grid)
             top, ids = token_masks.max(dim=0)
             covered = top > 0.999  # tokens not owned by exactly one region stay unrestricted
             blocked = (ids[:, None] != ids[None, :]) & covered[:, None] & covered[None, :]
@@ -281,7 +294,7 @@ class AttentionCouple:
             # Applied to the negative pass too (it uses the positive region layout): otherwise the negative
             # prediction of a region would depend on the other regions' latent and CFG would amplify that.
             q, k, v = module.compute_qkv(x, None, rope_emb=rope_emb, transformer_options=transformer_options)  # [b, N, heads, dim_head]
-            bias = self.get_anima_self_attn_bias(x.shape[1], q.device, q.dtype)
+            bias = self.get_anima_self_attn_bias(x.shape[1], q.device, q.dtype, transformer_options.get("anima_token_grid"))
             attn = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=bias)
             attn = attn.transpose(1, 2).reshape(*x.shape[:2], -1)
             return module.output_dropout(module.output_proj(attn))
@@ -323,7 +336,7 @@ class AttentionCouple:
                     attn = (1.0 - self.cross_region_blend) * attn + self.cross_region_blend * blended
 
                 if self.anima_regions[index][0] is not None:
-                    masks = self.get_anima_token_masks(index, n_tokens, attn.device, attn.dtype)
+                    masks = self.get_anima_token_masks(index, n_tokens, attn.device, attn.dtype, transformer_options.get("anima_token_grid"))
                     attn = (attn * masks.view(regions, 1, n_tokens, 1)).sum(dim=0)
                 else:
                     attn = attn.sum(dim=0)
