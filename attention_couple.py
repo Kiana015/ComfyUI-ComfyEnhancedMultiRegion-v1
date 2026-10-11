@@ -204,8 +204,13 @@ class AttentionCouple:
 
         new_model = model.clone()
         base_model = new_model.model
+        # Self-attention is global in a DiT, so text bound to one region leaks into the others through it.
+        # isolation_factor biases self-attention against tokens of other regions (0 = off).
+        isolate_self_attn = isolation_factor > 0 and self.anima_regions[1][0] is not None
         for i, block in enumerate(base_model.diffusion_model.blocks):
             new_model.add_object_patch(f"diffusion_model.blocks.{i}.cross_attn.forward", self.make_anima_patch(block.cross_attn, base_model))
+            if isolate_self_attn:
+                new_model.add_object_patch(f"diffusion_model.blocks.{i}.self_attn.forward", self.make_anima_self_attn_patch(block.self_attn))
 
         return (new_model, [new_positive[0]], [new_negative[0]])
 
@@ -254,6 +259,33 @@ class AttentionCouple:
             token_masks = self.sharpen_masks(token_masks, self.isolation_factor)
             self.anima_token_masks[key] = token_masks.to(device=device, dtype=dtype)
         return self.anima_token_masks[key]
+
+    def get_anima_self_attn_bias(self, n_tokens, device, dtype):
+        key = ("self_attn", n_tokens, device, dtype)
+        if key not in self.anima_token_masks:
+            token_masks = self.get_anima_token_masks(1, n_tokens, device, torch.float32)
+            top, ids = token_masks.max(dim=0)
+            covered = top > 0.999  # tokens not owned by exactly one region stay unrestricted
+            blocked = (ids[:, None] != ids[None, :]) & covered[:, None] & covered[None, :]
+            # attention weight towards other regions is scaled by (1 - isolation_factor)^2
+            strength = 2.0 * math.log(max(1.0 - self.isolation_factor, 1e-4))
+            bias = torch.where(blocked, strength, 0.0).to(dtype)
+            self.anima_token_masks[key] = bias[None, None]
+        return self.anima_token_masks[key]
+
+    def make_anima_self_attn_patch(self, module):
+        def forward(x, context=None, rope_emb=None, transformer_options={}):
+            if context is not None:
+                return type(module).forward(module, x, context, rope_emb=rope_emb, transformer_options=transformer_options)
+
+            # Applied to the negative pass too (it uses the positive region layout): otherwise the negative
+            # prediction of a region would depend on the other regions' latent and CFG would amplify that.
+            q, k, v = module.compute_qkv(x, None, rope_emb=rope_emb, transformer_options=transformer_options)  # [b, N, heads, dim_head]
+            bias = self.get_anima_self_attn_bias(x.shape[1], q.device, q.dtype)
+            attn = F.scaled_dot_product_attention(q.transpose(1, 2), k.transpose(1, 2), v.transpose(1, 2), attn_mask=bias)
+            attn = attn.transpose(1, 2).reshape(*x.shape[:2], -1)
+            return module.output_dropout(module.output_proj(attn))
+        return forward
 
     def make_anima_patch(self, module, base_model):
         def forward(x, context=None, rope_emb=None, transformer_options={}):
