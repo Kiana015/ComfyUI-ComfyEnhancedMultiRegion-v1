@@ -24,6 +24,8 @@ class ComfyMultiRegion:
                 **{f"weight_{i+1}": ("FLOAT", {"default": 1.0, "min": 0, "max": 10.0, "step": 0.1}) for i in range(10)},
                 # kept last so widget values of existing workflows stay in place
                 "model_type": (MODEL_TYPES,),
+                "isolation_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Anima: fraction of the sampling steps (0 = first, noisiest step) that run WITHOUT isolation. Early steps decide pose and composition, so a value around 0.2-0.4 lets the regions interact before isolation takes over."}),
+                "isolation_end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Anima: isolation stops at this fraction of the sampling steps (1 = until the end). Lower it to let the regions blend in the last steps."}),
             }
         }
 
@@ -35,6 +37,8 @@ class ComfyMultiRegion:
         try:
             cross_region_blend = kwargs.get("cross_region_blend", 0.3)
             model_type = kwargs.get("model_type", MODEL_TYPES[0])
+            isolation_start = kwargs.get("isolation_start", 0.0)
+            isolation_end = kwargs.get("isolation_end", 1.0)
             positives = [kwargs.get(f"positive_{i+1}") for i in range(num_regions)]
             ratios = [kwargs.get(f"ratio_{i+1}", 1.0 / num_regions) for i in range(num_regions - 1)]
             weights = [kwargs.get(f"weight_{i+1}", 1.0) for i in range(num_regions)]
@@ -58,7 +62,7 @@ class ComfyMultiRegion:
             for mask in conditioned_masks[1:]:
                 positive_combined = ConditioningCombine().combine(positive_combined, mask)[0]
 
-            return AttentionCouple().attention_couple(model, positive_combined, negative, "Attention", isolation_factor, cross_region_blend, model_type)
+            return AttentionCouple().attention_couple(model, positive_combined, negative, "Attention", isolation_factor, cross_region_blend, model_type, isolation_start, isolation_end)
         except Exception as e:
             print(f"An error occurred: {str(e)}")
             return None, None, None

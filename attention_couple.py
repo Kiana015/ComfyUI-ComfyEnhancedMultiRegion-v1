@@ -92,13 +92,15 @@ class AttentionCouple:
             "optional": {
                 "cross_region_blend": ("FLOAT", {"default": 0.3, "min": 0.0, "max": 1.0, "step": 0.01}),
                 "model_type": (MODEL_TYPES,),
+                "isolation_start": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 1.0, "step": 0.01}),
+                "isolation_end": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0, "step": 0.01}),
             }
         }
     RETURN_TYPES = ("MODEL", "CONDITIONING", "CONDITIONING")
     FUNCTION = "attention_couple"
     CATEGORY = "loaders"
 
-    def attention_couple(self, model, positive, negative, mode, isolation_factor, cross_region_blend=0.3, model_type=MODEL_TYPES[0]):
+    def attention_couple(self, model, positive, negative, mode, isolation_factor, cross_region_blend=0.3, model_type=MODEL_TYPES[0], isolation_start=0.0, isolation_end=1.0):
         if mode == "Latent":
             return (model, positive, negative)  # latent coupleの場合は何もしない
 
@@ -107,7 +109,7 @@ class AttentionCouple:
         if model_type == "Anima":
             if not is_anima:
                 raise ValueError("model_type is set to Anima, but the connected model is not an Anima model")
-            return self.attention_couple_anima(model, positive, negative, isolation_factor, cross_region_blend)
+            return self.attention_couple_anima(model, positive, negative, isolation_factor, cross_region_blend, isolation_start, isolation_end)
         if is_anima:
             raise ValueError("The connected model is Anima, set model_type to Anima")
 
@@ -170,11 +172,13 @@ class AttentionCouple:
 
         return (new_model, [new_positive[0]], [new_negative[0]])  # pool outputは・・・後回し
 
-    def attention_couple_anima(self, model, positive, negative, isolation_factor, cross_region_blend):
+    def attention_couple_anima(self, model, positive, negative, isolation_factor, cross_region_blend, isolation_start=0.0, isolation_end=1.0):
         # Anima (Cosmos-Predict2 DiT) has no patches_replace["attn2"] hook, so the
         # forward of every block's cross_attn is replaced through an object patch.
         self.isolation_factor = isolation_factor
         self.cross_region_blend = cross_region_blend
+        self.isolation_start = isolation_start
+        self.isolation_end = isolation_end
 
         new_positive = copy.deepcopy(positive)
         new_negative = copy.deepcopy(negative)
@@ -207,10 +211,11 @@ class AttentionCouple:
         base_model = new_model.model
 
         def record_token_grid(executor, x, *args, **kwargs):
-            # the node's width/height widgets can differ from the real latent, so read the real grid (patch size 2)
             options = kwargs.get("transformer_options")
             if options is not None:
+                # the node's width/height widgets can differ from the real latent, so read the real grid (patch size 2)
                 options["anima_token_grid"] = (math.ceil(x.shape[-2] / 2), math.ceil(x.shape[-1] / 2))
+                options["anima_isolation_active"] = self.isolation_active(options)
             return executor(x, *args, **kwargs)
         new_model.add_wrapper_with_key(comfy.patcher_extension.WrappersMP.DIFFUSION_MODEL, "multi_region_anima", record_token_grid)
 
@@ -273,6 +278,18 @@ class AttentionCouple:
             self.anima_token_masks[key] = token_masks.to(device=device, dtype=dtype)
         return self.anima_token_masks[key]
 
+    def isolation_active(self, transformer_options):
+        # Progress through the current sampling run: 0 = first (noisiest) step, 1 = end.
+        if self.isolation_start <= 0.0 and self.isolation_end >= 1.0:
+            return True
+        sigmas = transformer_options.get("sample_sigmas")
+        current = transformer_options.get("sigmas")
+        if sigmas is None or current is None or len(sigmas) < 2:
+            return True
+        step = (sigmas.to(current.device).float() - current.flatten()[0].float()).abs().argmin().item()
+        progress = step / (len(sigmas) - 1)
+        return self.isolation_start <= progress < self.isolation_end
+
     def get_anima_self_attn_bias(self, n_tokens, device, dtype, grid=None):
         key = ("self_attn", n_tokens, grid, device, dtype)
         if key not in self.anima_token_masks:
@@ -288,7 +305,7 @@ class AttentionCouple:
 
     def make_anima_self_attn_patch(self, module):
         def forward(x, context=None, rope_emb=None, transformer_options={}):
-            if context is not None:
+            if context is not None or not transformer_options.get("anima_isolation_active", True):
                 return type(module).forward(module, x, context, rope_emb=rope_emb, transformer_options=transformer_options)
 
             # Applied to the negative pass too (it uses the positive region layout): otherwise the negative
