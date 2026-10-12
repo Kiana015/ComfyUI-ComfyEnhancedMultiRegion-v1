@@ -49,16 +49,20 @@ The `model_type` input (last widget on the node) selects which architecture the 
 
 If `model_type` does not match the connected model, the node prints an error to the console and outputs nothing.
 
+**Recommended starting point (Anima)**
+
+`isolation_factor` 0, `cross_region_blend` 0, `2girls`/interaction words as needed in the region prompts, optionally a `base_positive` with the interaction and scene. In a test with two characters touching across the region border this was enough to keep the attributes of each region separate (cross-attention is already limited to each region's own prompt), and it is the setting where arms and hands can cross the border. Only raise `isolation_factor` if attributes still leak.
+
 **Reducing leakage between regions (Anima)**
 
-Anima's self-attention is global, so text bound to one region (e.g. `red eyes`) can leak into the others. Two inputs control this:
+Two inputs control leakage:
 
-- `isolation_factor`: strength of the self-attention block between regions (0 = off, 1 = fully blocked; attention towards other regions is scaled by `(1 - isolation_factor)²`). Try 0.8–0.95 if attributes leak; very high values can make the regions look disconnected (seams, mismatched lighting).
-- `cross_region_blend`: mixes the output of regions whose prompts are similar. Prompts that share most tags (quality tags, `2girls`, ...) count as similar, so this leaks by design. Set it to 0 when attributes leak.
+- `cross_region_blend`: mixes the output of regions whose prompts are similar. Prompts that share most tags (quality tags, `2girls`, ...) count as similar, so this leaks by design (the default 0.3 is meant for SDXL). Set it to 0 first.
+- `isolation_factor`: strength of the self-attention block between regions (0 = off, 1 = fully blocked; attention towards other regions is scaled by `(1 - isolation_factor)²`). Anima's self-attention is global, so this is the knob that stops text bound to one region (e.g. `red eyes`) from leaking into another through the image tokens. It also cuts anything that crosses the border (an arm is cut off at the border at 0.9+) and can make the regions look disconnected, so use the lowest value that works.
 
 **Keeping interaction between regions (Anima)**
 
-Isolation and interaction pull in opposite directions: the same self-attention that leaks `red eyes` is also what lets two characters touch, look at each other or share a pose. `isolation_start` and `isolation_end` (fractions of the sampling steps, 0 = first/noisiest step) limit isolation to a window:
+Isolation and interaction pull in opposite directions: the same self-attention that can leak `red eyes` is also what lets two characters touch, look at each other or share a pose. If you need some isolation but lose interaction, `isolation_start` and `isolation_end` (fractions of the sampling steps, 0 = first/noisiest step) limit isolation to a window:
 
 - `isolation_start` 0.2-0.4: the first steps run without isolation, so pose and composition are decided with the regions "seeing" each other, then isolation takes over while colors and details form.
 - `isolation_end` below 1: isolation stops before the last steps so the regions can blend.
