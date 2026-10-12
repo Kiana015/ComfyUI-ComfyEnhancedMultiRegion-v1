@@ -100,7 +100,7 @@ class AttentionCouple:
     FUNCTION = "attention_couple"
     CATEGORY = "loaders"
 
-    def attention_couple(self, model, positive, negative, mode, isolation_factor, cross_region_blend=0.3, model_type=MODEL_TYPES[0], isolation_start=0.0, isolation_end=1.0):
+    def attention_couple(self, model, positive, negative, mode, isolation_factor, cross_region_blend=0.3, model_type=MODEL_TYPES[0], isolation_start=0.0, isolation_end=1.0, base_positive=None, base_weight=0.0, mask_feather=0):
         if mode == "Latent":
             return (model, positive, negative)  # latent coupleの場合は何もしない
 
@@ -109,7 +109,7 @@ class AttentionCouple:
         if model_type == "Anima":
             if not is_anima:
                 raise ValueError("model_type is set to Anima, but the connected model is not an Anima model")
-            return self.attention_couple_anima(model, positive, negative, isolation_factor, cross_region_blend, isolation_start, isolation_end)
+            return self.attention_couple_anima(model, positive, negative, isolation_factor, cross_region_blend, isolation_start, isolation_end, base_positive, base_weight, mask_feather)
         if is_anima:
             raise ValueError("The connected model is Anima, set model_type to Anima")
 
@@ -172,13 +172,20 @@ class AttentionCouple:
 
         return (new_model, [new_positive[0]], [new_negative[0]])  # pool outputは・・・後回し
 
-    def attention_couple_anima(self, model, positive, negative, isolation_factor, cross_region_blend, isolation_start=0.0, isolation_end=1.0):
+    def attention_couple_anima(self, model, positive, negative, isolation_factor, cross_region_blend, isolation_start=0.0, isolation_end=1.0, base_positive=None, base_weight=0.0, mask_feather=0):
         # Anima (Cosmos-Predict2 DiT) has no patches_replace["attn2"] hook, so the
         # forward of every block's cross_attn is replaced through an object patch.
         self.isolation_factor = isolation_factor
         self.cross_region_blend = cross_region_blend
         self.isolation_start = isolation_start
         self.isolation_end = isolation_end
+        self.mask_feather = int(mask_feather)
+        # prompt for the whole image (interaction, scene, shared tags), blended in on top of the regional output
+        self.base_weight = base_weight if base_positive else 0.0
+        self.anima_base = None
+        if self.base_weight > 0:
+            base_cond = base_positive[0]
+            self.anima_base = (base_cond[0], base_cond[1].get("t5xxl_ids"), base_cond[1].get("t5xxl_weights"))
 
         new_positive = copy.deepcopy(positive)
         new_negative = copy.deepcopy(negative)
@@ -235,28 +242,30 @@ class AttentionCouple:
             return self.anima_contexts
 
         diffusion_model = base_model.diffusion_model
+
+        def encode(cond, ids, weights):
+            cond = cond.to(device=device, dtype=dtype)
+            if ids is None:
+                return cond, cond.shape[1]
+            # Same preprocessing as comfy.model_base.Anima.extra_conds (Qwen3 -> LLM adapter)
+            if weights is not None:
+                weights = weights.unsqueeze(0).unsqueeze(-1).to(device=device, dtype=dtype)
+            return diffusion_model.preprocess_text_embeds(cond, ids.unsqueeze(0).to(device), t5xxl_weights=weights), ids.shape[-1]
+
         contexts = []
         valid_lengths = []
-        for _, texts in self.anima_regions:
-            ctxs = []
-            lengths = []
-            for cond, ids, weights in texts:
-                cond = cond.to(device=device, dtype=dtype)
-                if ids is not None:
-                    # Same preprocessing as comfy.model_base.Anima.extra_conds (Qwen3 -> LLM adapter)
-                    if weights is not None:
-                        weights = weights.unsqueeze(0).unsqueeze(-1).to(device=device, dtype=dtype)
-                    cond = diffusion_model.preprocess_text_embeds(cond, ids.unsqueeze(0).to(device), t5xxl_weights=weights)
-                    lengths.append(ids.shape[-1])
-                else:
-                    lengths.append(cond.shape[1])
-                ctxs.append(cond)
+        for index, (_, texts) in enumerate(self.anima_regions):
+            encoded = [encode(*text) for text in texts]
+            ctxs = [e[0] for e in encoded]
+            valid_lengths.append([e[1] for e in encoded])
+            if index == 1 and self.anima_base is not None:
+                ctxs.append(encode(*self.anima_base)[0])  # last entry of the positive context = base prompt
             contexts.append(torch.cat(pad_conds_to_max(ctxs), dim=0))
-            valid_lengths.append(lengths)
 
         pos_ctx = contexts[1]
-        if pos_ctx.shape[0] > 1 and self.cross_region_blend > 0:
-            cond_means = torch.stack([pos_ctx[j, :max(1, valid_lengths[1][j])].float().mean(dim=0) for j in range(pos_ctx.shape[0])])
+        n_regions = len(valid_lengths[1])
+        if n_regions > 1 and self.cross_region_blend > 0:
+            cond_means = torch.stack([pos_ctx[j, :max(1, valid_lengths[1][j])].float().mean(dim=0) for j in range(n_regions)])
             similarity = compute_cond_similarity(cond_means)
         else:
             similarity = None
@@ -275,6 +284,10 @@ class AttentionCouple:
                 h, w = anima_token_grid(n_tokens, masks.shape[-2], masks.shape[-1])
             token_masks = F.interpolate(masks, size=(h, w), mode="nearest").view(masks.shape[0], h * w)
             token_masks = self.sharpen_masks(token_masks, self.isolation_factor)
+            if self.mask_feather > 0:  # soften the region borders over mask_feather tokens
+                k = self.mask_feather
+                token_masks = F.avg_pool2d(token_masks.view(-1, 1, h, w), 2 * k + 1, stride=1, padding=k, count_include_pad=False).view(-1, h * w)
+                token_masks = token_masks / token_masks.sum(dim=0, keepdim=True).clamp(min=1e-6)
             self.anima_token_masks[key] = token_masks.to(device=device, dtype=dtype)
         return self.anima_token_masks[key]
 
@@ -332,20 +345,23 @@ class AttentionCouple:
             for x_chunk, c in zip(x.chunk(len(cond_or_uncond), dim=0), cond_or_uncond):
                 index = 1 if c == 0 else 0  # cond_or_uncond: 0 = positive, 1 = negative
                 ctx = contexts[index]
-                regions = ctx.shape[0]
+                has_base = c == 0 and self.anima_base is not None  # the base prompt is the last entry
+                regions = ctx.shape[0] - (1 if has_base else 0)
                 b = x_chunk.shape[0]
 
                 # q: [b, N, heads, dim_head], k/v: [regions, L, heads, dim_head]
                 q, k, v = module.compute_qkv(x_chunk, ctx, rope_emb=rope_emb, transformer_options=transformer_options)
-                q = q.repeat(regions, 1, 1, 1)
+                q = q.repeat(ctx.shape[0], 1, 1, 1)
                 k = k.repeat_interleave(b, dim=0).to(q.dtype)
                 v = v.repeat_interleave(b, dim=0).to(q.dtype)
 
                 attn_kwargs = {"transformer_options": transformer_options}
                 if hasattr(module, "comfy_attention"):
                     attn_kwargs["preferred_attention"] = module.comfy_attention
-                attn = module.attn_op(q, k, v, **attn_kwargs)  # [regions * b, N, heads * dim_head]
-                attn = attn.view(regions, b, n_tokens, -1)
+                attn = module.attn_op(q, k, v, **attn_kwargs)  # [(regions [+ base]) * b, N, heads * dim_head]
+                attn = attn.view(ctx.shape[0], b, n_tokens, -1)
+                base_attn = attn[regions] if has_base else None
+                attn = attn[:regions]
 
                 # Cross-region similarity blending (only for conditional path)
                 if similarity is not None and c == 0:
@@ -357,6 +373,9 @@ class AttentionCouple:
                     attn = (attn * masks.view(regions, 1, n_tokens, 1)).sum(dim=0)
                 else:
                     attn = attn.sum(dim=0)
+
+                if base_attn is not None:
+                    attn = (1.0 - self.base_weight) * attn + self.base_weight * base_attn
 
                 # output_proj is linear, so it is applied once after the masked sum
                 out.append(module.output_dropout(module.output_proj(attn)))

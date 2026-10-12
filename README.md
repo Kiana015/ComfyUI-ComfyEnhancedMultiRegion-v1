@@ -64,6 +64,15 @@ Isolation and interaction pull in opposite directions: the same self-attention t
 - `isolation_end` below 1: isolation stops before the last steps so the regions can blend.
 - The defaults (0 and 1) isolate during the whole run. In a hires pass with denoise below 1 the window is relative to that pass's own steps.
 
+**Characters touching across the border / visible seams (Anima)**
+
+A region only sees its own prompt, so a hand that crosses the border is drawn by whichever region it lands in, and that region's prompt does not mention it. Two optional inputs help:
+
+- `base_positive` + `base_weight`: a prompt for the *whole* image, mixed into every region (`base_weight` 0.3-0.5). Put the interaction (`facing each other, hand on the other girl's shoulder, 2girls`) and the shared scene/quality tags here, and keep the per-character attributes (hair, eyes, outfit) in the region prompts. The negative pass is not affected.
+- `mask_feather`: softens the region borders over that many tokens (1 token = 16 px; try 2-3). Tokens inside the soft band are also left out of the self-attention isolation, so the two regions can connect there.
+
+Both default to off, and the widgets are placed last so existing workflows keep their values.
+
 On SDXL, `isolation_factor` only sharpens soft masks and has no effect on the hard masks this node generates.
 
 
