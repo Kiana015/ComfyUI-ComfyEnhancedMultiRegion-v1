@@ -81,6 +81,15 @@ On SDXL, `isolation_factor` only sharpens soft masks and has no effect on the ha
 
 
 
+### Anima Character Prompts (NAI-style character prompts)
+
+Two nodes under **loaders → anima** that place each character anywhere in the image instead of in horizontal/vertical strips:
+
+- **Anima Character**: one character: its own `conditioning` (looks, outfit, expression of this character only), its area as a box (`x`, `y` = center, `width`, `height`, all 0-1 of the image) and a `weight` used where areas overlap. Connect a `mask` (e.g. painted in the mask editor) to use any shape instead of the box.
+- **Anima Character Prompts**: `base` (the whole scene: composition, interaction, background, quality tags) + up to 6 characters. Areas no character covers use the base prompt; `base_weight` also mixes the base prompt into the character areas. `mask_feather` softens the area edges, `isolation_factor` (default 0) and the step window work as on Comfy Multi-Region.
+
+Connect `model`, `positive` and `negative` outputs to the KSampler (and to a hires KSampler if you use one). Unlike NovelAI V4, whose model was trained with per-character captions and positions, Anima was not, so this steers attention at inference time: characters are kept apart by their areas, and places where they overlap or touch remain the hardest part.
+
 ## Credits
 
 - [**@laksjdjf**](https://github.com/laksjdjf) – [Attention-Couple](https://github.com/laksjdjf/attention-couple-ComfyUI) and [**@Danand**](https://github.com/Danand) – [Comfy-Couple](https://github.com/Danand/ComfyUI-ComfyCouple).
