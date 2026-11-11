@@ -90,6 +90,16 @@ Two nodes under **loaders → anima** that place each character anywhere in the 
 
 Connect `model`, `positive` and `negative` outputs to the KSampler (and to a hires KSampler if you use one). Unlike NovelAI V4, whose model was trained with per-character captions and positions, Anima was not, so this steers attention at inference time: characters are kept apart by their areas, and places where they overlap or touch remain the hardest part.
 
+### Anima Auto Character Prompts (no positions)
+
+**Anima Auto Character Prompts** takes `base` + up to 6 plain character prompts (no boxes, no masks) and finds where each character is by itself:
+
+1. During the first `layout_end` part of the steps (default 0.25) all prompts are combined, so the model composes the scene freely, and the node records which image tokens attend to which character's prompt.
+2. From that it builds an area per character (`sharpness` = how hard the borders are, `mask_feather` = smoothing); what belongs to no character goes to the base prompt.
+3. For the remaining steps every character only gets its own prompt in its area, like the box version; `base_weight` mixes the base prompt in.
+
+Turn on `save_layout_preview` to save a picture of the found areas to the output folder (gray = base, then red, blue, green, yellow, purple, cyan for characters 1-6) and check whether the node found the characters. This is experimental: the areas come from the model's own early attention, so characters with very similar prompts can end up sharing an area; a higher `layout_end` finds the areas better but leaves more steps where the prompts are mixed. A hires pass with the same model finds the layout again at its own resolution.
+
 ## Credits
 
 - [**@laksjdjf**](https://github.com/laksjdjf) – [Attention-Couple](https://github.com/laksjdjf/attention-couple-ComfyUI) and [**@Danand**](https://github.com/Danand) – [Comfy-Couple](https://github.com/Danand/ComfyUI-ComfyCouple).
