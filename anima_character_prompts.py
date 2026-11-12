@@ -105,17 +105,19 @@ class AnimaCharacterPrompts:
 
 
 def derive_masks(affinity, grid, sharpness, feather):
-    """affinity: [b, segments, N] attention mass from image tokens to each prompt (segment 0 = base).
-    Returns soft masks [b, segments, N] that sum to 1 over the segments."""
-    b, segments, n = affinity.shape
-    if grid is not None and grid[0] * grid[1] == n:
-        # light denoise of the raw maps before comparing them
-        affinity = F.avg_pool2d(affinity.reshape(b * segments, 1, *grid), 3, stride=1, padding=1, count_include_pad=False).reshape(b, segments, n)
-    # each prompt is compared with its own average, so long or generic prompts do not win everywhere
-    relative = affinity / affinity.mean(dim=2, keepdim=True).clamp(min=1e-12)
-    masks = torch.softmax(sharpness * torch.log(relative.clamp(min=1e-6)), dim=1)
-    if feather > 0 and grid is not None and grid[0] * grid[1] == n:
-        masks = F.avg_pool2d(masks.reshape(b * segments, 1, *grid), 2 * feather + 1, stride=1, padding=feather, count_include_pad=False).reshape(b, segments, n)
+    """affinity: [b, characters, N] attention mass from image tokens to each character's distinctive tokens.
+    Returns soft masks [b, 1 + characters, N] (index 0 = base prompt) that sum to 1 over the segments."""
+    b, chars, n = affinity.shape
+    on_grid = grid is not None and grid[0] * grid[1] == n
+    if on_grid:
+        # denoise the raw maps before comparing them
+        affinity = F.avg_pool2d(affinity.reshape(b * chars, 1, *grid), 5, stride=1, padding=2, count_include_pad=False).reshape(b, chars, n)
+    # contrast of each map against itself (z-score): works whatever the absolute level of a prompt is
+    z = (affinity - affinity.mean(dim=2, keepdim=True)) / affinity.std(dim=2, keepdim=True).clamp(min=1e-12)
+    logits = torch.cat([torch.zeros_like(z[:, :1]), sharpness * z], dim=1)  # the base prompt takes what no character claims
+    masks = torch.softmax(logits, dim=1)
+    if feather > 0 and on_grid:
+        masks = F.avg_pool2d(masks.reshape(b * (chars + 1), 1, *grid), 2 * feather + 1, stride=1, padding=feather, count_include_pad=False).reshape(b, chars + 1, n)
         masks = masks / masks.sum(dim=1, keepdim=True).clamp(min=1e-6)
     return masks
 
@@ -176,6 +178,23 @@ class AutoLayout:
         # same preprocessing as comfy.model_base.Anima.extra_conds (Qwen3 -> LLM adapter, padded to 512)
         return self.base_model.diffusion_model.preprocess_text_embeds(emb, ids.unsqueeze(0).to(device), t5xxl_weights=weights), ids.shape[-1]
 
+    def distinctive_positions(self, bounds):
+        """For every character, the positions (in the joint context) of its tokens that appear in no other prompt.
+        Shared tags (1girl, long hair, ...) pull attention the same way for every character and hide the signal."""
+        ids = [p[1].tolist() if p[1] is not None else None for p in self.prompts]
+        self.distinctive_counts = []
+        positions = []
+        for i in range(1, len(self.prompts)):
+            start, end = bounds[i]
+            own = ids[i]
+            others = set(t for j, other in enumerate(ids) if j != i and other is not None for t in other)
+            picked = list(range(start, end)) if own is None else [start + k for k, t in enumerate(own) if t not in others]
+            if not picked:  # identical prompts: fall back to every token
+                picked = list(range(start, end))
+            self.distinctive_counts.append((len(picked), end - start))
+            positions.append(torch.tensor(picked, dtype=torch.long))
+        return positions
+
     def get_contexts(self, device, dtype):
         if self.contexts_key != (device, dtype):
             encoded = [self.encode(p, device, dtype) for p in self.prompts]
@@ -189,6 +208,7 @@ class AutoLayout:
             self.contexts = {
                 "joint": joint,
                 "bounds": bounds,
+                "distinctive": self.distinctive_positions(bounds),
                 "regional": torch.cat(pad_conds_to_max([ctx for ctx, _ in encoded]), dim=0),
                 "negative": self.encode(self.negative, device, dtype)[0],
             }
@@ -212,14 +232,26 @@ class AutoLayout:
                 self.masks = None
             options["anima_auto_grid"] = grid
             options["anima_auto_layout"] = progress < self.layout_end
+            options["anima_auto_step"] = step if sigmas is not None and current is not None and len(sigmas) > 1 else 0
         return executor(x, *args, **kwargs)
 
     def get_masks(self, grid):
         if self.masks is None and self.affinity is not None:
             self.masks = derive_masks(self.affinity, grid, self.sharpness, self.feather)
+            self.report()
             if self.preview:
                 save_layout_preview(self.masks, grid)
         return self.masks
+
+    def report(self):
+        # contrast = std / mean of a character's map: close to 0 means the node found no place for it
+        parts = []
+        for i, (picked, total) in enumerate(self.distinctive_counts):
+            a = self.affinity[0, i]
+            contrast = (a.std() / a.mean().clamp(min=1e-12)).item()
+            parts.append(f"character {i + 1}: {picked}/{total} distinctive tokens, contrast {contrast:.2f}, area {self.masks[0, i + 1].mean().item() * 100:.0f}%")
+        parts.append(f"base: area {self.masks[0, 0].mean().item() * 100:.0f}%")
+        print("[Anima Auto Character Prompts] layout: " + " | ".join(parts))
 
     def joint_attention(self, module, x, ctx, rope_emb, transformer_options, measure):
         q, k, v = module.compute_qkv(x, ctx["joint"], rope_emb=rope_emb, transformer_options=transformer_options)
@@ -233,7 +265,8 @@ class AutoLayout:
         # explicit attention so the weights can be read: [b, heads, N, L]
         probs = (torch.einsum("bnhd,lhd->bhnl", q.float(), k[0].float()) * q.shape[-1] ** -0.5).softmax(dim=-1)
         attn = torch.einsum("bhnl,lhd->bnhd", probs, v[0].float()).reshape(b, n, -1).to(q.dtype)
-        mass = torch.stack([probs[..., s:e].sum(dim=-1) for s, e in ctx["bounds"]], dim=1).mean(dim=2)  # [b, segments, N]
+        mass = torch.stack([probs[..., p.to(probs.device)].sum(dim=-1) for p in ctx["distinctive"]], dim=1).mean(dim=2)  # [b, characters, N]
+        mass = mass * (transformer_options.get("anima_auto_step", 0) + 1)  # the first, noisiest steps count less
         self.affinity = mass if self.affinity is None else self.affinity + mass
         return module.output_dropout(module.output_proj(attn))
 
@@ -287,7 +320,7 @@ class AnimaAutoCharacterPrompts:
                 "negative": ("CONDITIONING",),
                 "character_1": ("CONDITIONING", {"tooltip": "Prompt of one character only (looks, outfit, expression). No position needed."}),
                 "layout_end": ("FLOAT", {"default": 0.25, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "Fraction of the steps that run with all prompts combined while the node finds where each character is. After that every character only gets its own prompt in its area. Higher = better found areas but more mixing in the first steps."}),
-                "sharpness": ("FLOAT", {"default": 4.0, "min": 0.5, "max": 16.0, "step": 0.5, "tooltip": "How hard the found areas are separated. Low = soft, overlapping areas; high = sharp borders."}),
+                "sharpness": ("FLOAT", {"default": 4.0, "min": 0.5, "max": 16.0, "step": 0.5, "tooltip": "How hard the found areas are separated (applied to each character's contrast map). Low = soft, overlapping areas; high = sharp borders."}),
                 "base_weight": ("FLOAT", {"default": 0.2, "min": 0.0, "max": 1.0, "step": 0.01, "tooltip": "How much of the base prompt is mixed into the character areas after the layout steps."}),
                 "mask_feather": ("INT", {"default": 2, "min": 0, "max": 16, "step": 1, "tooltip": "Smooth the found areas over this many tokens (1 token = 16 px)."}),
                 "save_layout_preview": ("BOOLEAN", {"default": False, "tooltip": "Save a picture of the found areas to the output folder (gray = base, then red, blue, green, yellow, purple, cyan for characters 1-6)."}),

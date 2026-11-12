@@ -94,11 +94,11 @@ Connect `model`, `positive` and `negative` outputs to the KSampler (and to a hir
 
 **Anima Auto Character Prompts** takes `base` + up to 6 plain character prompts (no boxes, no masks) and finds where each character is by itself:
 
-1. During the first `layout_end` part of the steps (default 0.25) all prompts are combined, so the model composes the scene freely, and the node records which image tokens attend to which character's prompt.
-2. From that it builds an area per character (`sharpness` = how hard the borders are, `mask_feather` = smoothing); what belongs to no character goes to the base prompt.
+1. During the first `layout_end` part of the steps (default 0.25) all prompts are combined, so the model composes the scene freely, and the node records which image tokens attend to each character's *distinctive* tokens: the tokens of its prompt that appear in no other prompt (name, hair/eye colors, LoRA trigger). Shared tags such as `1girl` or `long hair` pull attention the same way for every character, so they are left out. Later layout steps count more than the first, noisiest ones.
+2. From that it builds an area per character from the contrast of its map (`sharpness` = how hard the borders are, `mask_feather` = smoothing); what belongs to no character goes to the base prompt.
 3. For the remaining steps every character only gets its own prompt in its area, like the box version; `base_weight` mixes the base prompt in.
 
-Turn on `save_layout_preview` to save a picture of the found areas to the output folder (gray = base, then red, blue, green, yellow, purple, cyan for characters 1-6) and check whether the node found the characters. This is experimental: the areas come from the model's own early attention, so characters with very similar prompts can end up sharing an area; a higher `layout_end` finds the areas better but leaves more steps where the prompts are mixed. A hires pass with the same model finds the layout again at its own resolution.
+The console prints, per character, the number of distinctive tokens, the contrast of its map and the area it got. Give every character tags the others do not have; a character with few distinctive tokens or a contrast close to 0 was not found. Turn on `save_layout_preview` to save a picture of the found areas to the output folder (gray = base, then red, blue, green, yellow, purple, cyan for characters 1-6) and check whether the node found the characters (one even color all over means it did not). This is experimental: the areas come from the model's own early attention, so characters with very similar prompts can end up sharing an area; a higher `layout_end` finds the areas better but leaves more steps where the prompts are mixed. A hires pass with the same model finds the layout again at its own resolution.
 
 ## Credits
 
