@@ -40,6 +40,8 @@ This is a fork of [**Danand/ComfyUI-ComfyCouple**](https://github.com/Danand/Com
 
 Example workflow is [here](workflows/MultiRegionalWorkflow.json).
 
+A complete reference of every parameter (in Indonesian) is in [docs/PARAMETERS.md](docs/PARAMETERS.md).
+
 ### Model type (SDXL / Anima)
 
 The `model_type` input (last widget on the node) selects which architecture the attention patch targets:
